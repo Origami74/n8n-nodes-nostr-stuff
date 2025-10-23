@@ -46,12 +46,16 @@ export class Nostrobots implements INodeType {
 				type: 'options',
 				options: [
 					{
+						name: 'BasicNote',
+						value: 'kind1',
+					},
+					{
 						name: 'Custom Event',
 						value: 'customEvent',
 					},
 					{
-						name: 'BasicNote',
-						value: 'kind1',
+						name: 'Encrypted Direct Message(nip-04)',
+						value: 'nip-04',
 					},
 					{
 						name: 'Event(advanced)',
@@ -60,10 +64,6 @@ export class Nostrobots implements INodeType {
 					{
 						name: 'Raw Json Event(advanced)',
 						value: 'json',
-					},
-					{
-						name: 'Encrypted Direct Message(nip-04)',
-						value: 'nip-04',
 					},
 				],
 				default: 'kind1',
