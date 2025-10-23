@@ -2,6 +2,7 @@ import { Filter } from 'nostr-tools';
 import { getHexEventId, getHexPubKey } from '../convert/get-hex';
 
 export enum FilterStrategy {
+	customFilter = 'customFilter',
 	eventid = 'eventid',
 	hashtag = 'hashtag',
 	mention = 'mention',
@@ -17,6 +18,7 @@ export function buildFilter(
 	since?: number,
 	until?: number,
 	kinds = [1],
+	sinceNow = false,
 ): Filter {
 	let filter = {};
 
@@ -27,6 +29,33 @@ export function buildFilter(
 	}
 
 	switch (strategy) {
+		case 'customFilter':
+			if (!specificData) throw new Error('Custom filter JSON is required');
+			const customFilterString = specificData;
+
+			let customJson;
+			try {
+				customJson = JSON.parse(customFilterString);
+			} catch (error) {
+				console.warn('Json parse failed for custom filter.');
+				throw error;
+			}
+
+			// If sinceNow is true, always override since with current timestamp
+			if (sinceNow) {
+				customJson.since = Math.floor(Date.now() / 1000);
+			} else if (since !== undefined && !customJson.since) {
+				// Only apply since if not already in the filter and sinceNow is false
+				customJson.since = since;
+			}
+
+			if (until !== undefined && !customJson.until) {
+				customJson.until = until;
+			}
+
+			filter = customJson;
+			break;
+
 		case 'pubkey':
 			if (!specificData) throw new Error('Public key is required');
 			const pubkey = getHexPubKey(specificData);

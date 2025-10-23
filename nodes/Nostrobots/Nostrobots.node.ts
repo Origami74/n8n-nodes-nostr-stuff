@@ -8,10 +8,10 @@ import {
 } from 'n8n-workflow';
 import { hexToBytes } from '@noble/hashes/utils';
 import ws from 'ws';
-import { finalizeEvent, nip04, Relay } from 'nostr-tools';
+import { finalizeEvent, nip04 } from 'nostr-tools';
 import { defaultRelays } from '../../src/constants/rerays';
 import { getHex, getHexPubKey } from '../../src/convert/get-hex';
-import { oneTimePostToMultiRelay, PostResult } from '../../src/write';
+import { parseRelayInput, publishEvent } from '../../src/services/applesauce';
 
 // polyfills
 (global as any).WebSocket = ws;
@@ -45,6 +45,10 @@ export class Nostrobots implements INodeType {
 				name: 'resource',
 				type: 'options',
 				options: [
+					{
+						name: 'Custom Event',
+						value: 'customEvent',
+					},
 					{
 						name: 'BasicNote',
 						value: 'kind1',
@@ -85,7 +89,7 @@ export class Nostrobots implements INodeType {
 				type: 'options',
 				displayOptions: {
 					show: {
-						resource: ['event', 'kind1', 'json', 'nip-04'],
+						resource: ['event', 'kind1', 'json', 'nip-04', 'customEvent'],
 					},
 				},
 				options: [
@@ -98,6 +102,23 @@ export class Nostrobots implements INodeType {
 				],
 				default: 'send',
 				noDataExpression: true,
+			},
+			// custom event option
+			{
+				displayName: 'Custom Event JSON',
+				name: 'customEventJson',
+				type: 'json',
+				required: true,
+				displayOptions: {
+					show: {
+						operation: ['send'],
+						resource: ['customEvent'],
+					},
+				},
+				default: '{"kind": 1, "content": "Hello Nostr!", "tags": []}',
+				placeholder: '{"kind": 1, "content": "...", "tags": [...]}',
+				description: 'Complete custom Nostr event as JSON. Will be signed automatically.',
+				hint: 'Provide kind, content, and tags. The event will be signed with your credentials.',
 			},
 			// common option
 			{
@@ -262,12 +283,27 @@ export class Nostrobots implements INodeType {
 				displayOptions: {
 					show: {
 						operation: ['send'],
-						resource: ['event', 'kind1', 'json', 'nip-04'],
+						resource: ['event', 'kind1', 'json', 'nip-04', 'customEvent'],
 					},
 				},
-				default: defaultRelays.join(','),
-				placeholder: 'wss://relay.damus.io,wss://nostr.wine',
-				description: 'Relay address joined with ","',
+				default: JSON.stringify(defaultRelays),
+				placeholder: '["wss://relay.damus.io", "wss://nostr.wine"]',
+				description: 'Relay addresses as JSON array or comma-separated string',
+				hint: 'Supports both JSON array format ["wss://..."] and comma-separated format',
+			},
+			{
+				displayName: 'Minimum Successful Relays',
+				name: 'minSuccessfulRelays',
+				type: 'number',
+				displayOptions: {
+					show: {
+						operation: ['send'],
+						resource: ['event', 'kind1', 'json', 'nip-04', 'customEvent'],
+					},
+				},
+				default: 1,
+				description: 'Minimum number of relays that must successfully receive the event',
+				hint: 'Set to 0 to not require any successful publishes (not recommended)',
 			},
 		],
 	};
@@ -296,9 +332,6 @@ export class Nostrobots implements INodeType {
 			sk = hexToBytes(secKey);
 		}
 
-		// nostr relay connections for reuse.
-		let connections: (Relay | undefined)[] | undefined = undefined;
-
 		for (let i = 0; i < items.length; i++) {
 			let otherOption = false;
 
@@ -306,7 +339,18 @@ export class Nostrobots implements INodeType {
 			 * Prepare event.
 			 */
 			let event: any = { created_at: Math.floor(Date.now() / 1000) };
-			if (resource === 'kind1') {
+			if (resource === 'customEvent') {
+				const customEventString = this.getNodeParameter('customEventJson', i) as string;
+				try {
+					const customEventData = JSON.parse(customEventString);
+					event = {
+						...customEventData,
+						created_at: customEventData.created_at || Math.floor(Date.now() / 1000),
+					};
+				} catch (error) {
+					throw new NodeOperationError(this.getNode(), 'Invalid custom event JSON was provided!');
+				}
+			} else if (resource === 'kind1') {
 				event.content = this.getNodeParameter('content', i) as string;
 				event.kind = 1;
 				event.tags = [];
@@ -358,34 +402,34 @@ export class Nostrobots implements INodeType {
 			 * Execute Operation.
 			 */
 			if (operation === 'send') {
-				// Get relay input
+				// Get relay input and parse it (supports both JSON array and comma-separated)
 				const relays = this.getNodeParameter('relay', i) as string;
-				const relayArray = relays.split(',');
+				const relayArray = parseRelayInput(relays);
+				const minSuccessfulRelays = this.getNodeParameter('minSuccessfulRelays', i) as number;
 
-				// Sign kind1 Event.
+				// Sign Event.
 				const signedEvent = !otherOption && resource !== 'json' ? finalizeEvent(event, sk) : event;
 
-				// Post event to relay.
-				const postResult: PostResult[] = await oneTimePostToMultiRelay(
-					signedEvent,
-					relayArray,
-					EVENT_POST_TIMEOUT,
-					connections,
-				);
-				const results = postResult.map((v) => v.result);
-				connections = postResult.map((v) => v.connection);
+				// Post event to relays using applesauce.
+				const results = await publishEvent(signedEvent, relayArray, EVENT_POST_TIMEOUT);
+
+				// Check if we met the minimum success threshold
+				const successCount = results.filter((r) => r.success).length;
+				if (successCount < minSuccessfulRelays) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Failed to publish to minimum required relays. Required: ${minSuccessfulRelays}, Successful: ${successCount}/${relayArray.length}`,
+					);
+				}
 
 				// Return result.
-				returnData.push({ event: signedEvent, sendResults: results });
+				returnData.push({
+					event: signedEvent,
+					sendResults: results,
+					successCount,
+					totalRelays: relayArray.length,
+				});
 			}
-		}
-		// close all connection at finally.
-		if (connections) {
-			connections.forEach(async (c) => {
-				if (c) {
-					c.close();
-				}
-			});
 		}
 
 		// Map data to n8n data structure

@@ -16,6 +16,7 @@ import { whiteListGuard } from '../../src/guards/white-list-guard';
 import { RateLimitGuard } from '../../src/guards/rate-limit-guard';
 import { type SubscribeManyParams } from 'nostr-tools/lib/types/pool';
 import { log } from '../../src/common/log';
+import { parseRelayInput } from '../../src/services/applesauce';
 
 // polyfills
 (global as any).WebSocket = ws;
@@ -91,23 +92,15 @@ export class NostrobotsEventTrigger implements INodeType {
 				description: 'Whether events in threads are also included in the scope',
 			},
 			{
-				displayName: 'Relay1',
-				name: 'relay1',
+				displayName: 'Relays',
+				name: 'relays',
 				type: 'string',
-				default: '',
-				placeholder: 'wss://...',
+				default: '["wss://relay.damus.io"]',
+				placeholder: '["wss://relay.damus.io", "wss://nostr.wine"]',
 				noDataExpression: true,
 				required: true,
-				description: 'Target relay 1',
-			},
-			{
-				displayName: 'Relay2',
-				name: 'relay2',
-				type: 'string',
-				noDataExpression: true,
-				default: '',
-				placeholder: 'wss://...',
-				description: 'Target relay 2(optional)',
+				description: 'Relay addresses as JSON array or comma-separated string',
+				hint: 'Supports both JSON array format ["wss://..."] and comma-separated format',
 			},
 			{
 				displayName: 'RatelimitingCountForAll',
@@ -177,8 +170,8 @@ export class NostrobotsEventTrigger implements INodeType {
 		// Common params
 		const strategy = this.getNodeParameter('strategy', 0) as string;
 		const threads = this.getNodeParameter('threads', 0) as boolean;
-		const relay1 = this.getNodeParameter('relay1', 0) as string;
-		const relay2 = this.getNodeParameter('relay2', 0) as string;
+		const relaysInput = this.getNodeParameter('relays', 0) as string;
+		const relays = parseRelayInput(relaysInput);
 
 		// For mention params
 		const publickey = this.getNodeParameter('publickey', 0) as string;
@@ -197,7 +190,6 @@ export class NostrobotsEventTrigger implements INodeType {
 			throw new NodeOperationError(this.getNode(), 'Invalid strategy.');
 		}
 
-		const relays = relay2 ? [relay1, relay2] : [relay1];
 		let filter = buildFilter(
 			strategy as FilterStrategy,
 			{ mention: publickey },

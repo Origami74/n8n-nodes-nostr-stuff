@@ -11,10 +11,10 @@ import ws from 'ws';
 import { defaultRelays } from '../../src/constants/rerays';
 import { getHexEventId, getHex } from '../../src/convert/get-hex';
 import { getSince, getUnixtimeFromDateString, getUntilNow } from '../../src/convert/time';
-import { fetchEvents } from '../../src/read';
 import { isSupportNip50 } from '../../src/common/relay-info';
 import { FilterStrategy, buildFilter } from '../../src/common/filter';
 import { ShareableIdentifier } from '../../src/convert/parse-tlv-hex';
+import { parseRelayInput, fetchEvents, deduplicateEvents } from '../../src/services/applesauce';
 
 // Extended Event type for NIP-04 decrypted messages
 interface DecryptedEvent extends Event {
@@ -58,6 +58,10 @@ export class Nostrobotsread implements INodeType {
 				type: 'options',
 				options: [
 					{
+						name: 'Custom Filter',
+						value: 'customFilter',
+					},
+					{
 						name: 'Encrypted Direct Message(nip-04)',
 						value: 'nip-04',
 					},
@@ -90,6 +94,33 @@ export class Nostrobotsread implements INodeType {
 				noDataExpression: true,
 				required: true,
 				description: 'Filter method',
+			},
+			{
+				displayName: 'Custom Filter',
+				name: 'customFilter',
+				type: 'json',
+				required: true,
+				displayOptions: {
+					show: {
+						strategy: ['customFilter'],
+					},
+				},
+				default: '{"kinds": [1], "limit": 100}',
+				placeholder: '{"kinds": [1], "authors": ["hex..."], "limit": 100}',
+				description: 'Complete custom Nostr filter as JSON. No predefined constraints.',
+				hint: 'NIP-01 filter format. https://github.com/nostr-protocol/nips/blob/master/01.md',
+			},
+			{
+				displayName: 'Since Now',
+				name: 'sinceNow',
+				type: 'boolean',
+				default: true,
+				displayOptions: {
+					show: {
+						strategy: ['customFilter'],
+					},
+				},
+				description: 'Whether to set "since" to current timestamp (fetch only new events)',
 			},
 			{
 				displayName: 'Pubkey',
@@ -285,9 +316,10 @@ export class Nostrobotsread implements INodeType {
 				displayName: 'Custom Relay',
 				name: 'relay',
 				type: 'string',
-				default: defaultRelays.join(','),
-				placeholder: 'wss://relay.damus.io,wss://nostr.wine',
-				description: 'Relay address joined with ","',
+				default: JSON.stringify(defaultRelays),
+				placeholder: '["wss://relay.damus.io", "wss://nostr.wine"]',
+				description: 'Relay addresses as JSON array or comma-separated string',
+				hint: 'Supports both JSON array format ["wss://..."] and comma-separated format',
 			},
 			{
 				displayName: 'Error With Empty Result',
@@ -332,24 +364,28 @@ export class Nostrobotsread implements INodeType {
 		let events: Event[] = [];
 
 		for (let i = 0; i < items.length; i++) {
-			// Get relay input
+			// Get relay input and parse it (supports both JSON array and comma-separated)
 			const relays = this.getNodeParameter('relay', i) as string;
-			let relayArray = relays.split(',');
+			let relayArray = parseRelayInput(relays);
 
 			let relative: boolean | undefined = undefined;
 			let since: number | undefined = undefined;
 			let until: number | undefined = undefined;
+			let sinceNow = false;
 
-			if (strategy !== 'eventid') {
+			// Handle custom filter strategy
+			if (strategy === 'customFilter') {
+				sinceNow = this.getNodeParameter('sinceNow', i) as boolean;
+			} else if (strategy !== 'eventid') {
 				relative = this.getNodeParameter('relative', i) as boolean;
 
 				if (relative) {
-					const from = this.getNodeParameter('from', i) as number; // ug.
+					const from = this.getNodeParameter('from', i) as number;
 					const unit = this.getNodeParameter('unit', i) as 'day' | 'hour' | 'minute';
 
 					since = getSince(from, unit);
 					until = getUntilNow();
-				} else if (relative) {
+				} else if (!relative) {
 					since = getUnixtimeFromDateString(this.getNodeParameter('since', i) as string);
 					until = getUnixtimeFromDateString(this.getNodeParameter('until', i) as string);
 				}
@@ -387,10 +423,14 @@ export class Nostrobotsread implements INodeType {
 			const strategyInfo = {
 				eventid: si?.special,
 				[strategy]:
-					strategy === 'nip-04' ? myPubkey || '' : (this.getNodeParameter(strategy, i) as string),
+					strategy === 'nip-04'
+						? myPubkey || ''
+						: strategy === 'customFilter'
+						? (this.getNodeParameter('customFilter', i) as string)
+						: (this.getNodeParameter(strategy, i) as string),
 			};
 
-			const filter: Filter = buildFilter(strategy, strategyInfo, since, until);
+			const filter: Filter = buildFilter(strategy, strategyInfo, since, until, [1], sinceNow);
 
 			/**
 			 * fetch events
@@ -399,6 +439,11 @@ export class Nostrobotsread implements INodeType {
 
 			events = [...events, ...results];
 		}
+
+		/**
+		 * Deduplicate events
+		 */
+		events = deduplicateEvents(events);
 
 		/**
 		 * Empty guard
@@ -436,23 +481,13 @@ export class Nostrobotsread implements INodeType {
 		}
 
 		/**
-		 * Remove duplicate event.
-		 */
-		const res: Event[] = [];
-		events.forEach((e) => {
-			if (-1 === res.findIndex((u) => u.id === e.id)) {
-				res.push(e);
-			}
-		});
-
-		/**
 		 * Sort created_at DESC.
 		 */
-		res.sort((a, b) => b.created_at - a.created_at);
+		events.sort((a, b) => b.created_at - a.created_at);
 
 		/**
 		 * Map data to n8n data structure
 		 */
-		return [this.helpers.returnJsonArray(res as Partial<Event>[])];
+		return [this.helpers.returnJsonArray(events as Partial<Event>[])];
 	}
 }
